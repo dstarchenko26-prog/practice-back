@@ -3,6 +3,8 @@ package ua.lpnu.practBack.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.annotations.OnDelete;
+import org.hibernate.annotations.OnDeleteAction;
 import org.hibernate.type.SqlTypes;
 import org.springframework.data.annotation.CreatedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
@@ -31,8 +33,9 @@ public class Calculation {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
-    @ManyToOne(fetch = FetchType.EAGER)
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "formula_id", nullable = false)
+    @OnDelete(action = OnDeleteAction.CASCADE) // <--- ДОДАТИ ЦЕ
     private Formula formula;
 
     @JdbcTypeCode(SqlTypes.JSON)

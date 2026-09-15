@@ -6,133 +6,512 @@ import org.springframework.stereotype.Service;
 import ua.lpnu.practBack.entity.Formula;
 import ua.lpnu.practBack.entity.Formula.FormulaScript;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
 public class MathService {
 
-    public Map<String, Double> runAutoSolver(Formula formula, Map<String, Double> inputs) {
-        Map<String, Double> context = new HashMap<>(inputs);
+    private static final int MAX_PASSES = 20;
 
-        if (formula.getScripts() == null || formula.getScripts().isEmpty()) {
+    private static final String INTERNAL_CURRENT = "CURRENT";
+
+    private static final Pattern VARIABLE_PATTERN =
+            Pattern.compile("\\b[a-zA-Z_][a-zA-Z0-9_]*\\b");
+
+    private static final Set<String> SYMJA_NAMES = Set.of(
+            "Sin", "Cos", "Tan", "Cot", "Sec", "Csc",
+            "Sinh", "Cosh", "Tanh", "Exp", "Log", "Sqrt",
+            "Abs", "Sign", "Floor", "Ceiling", "Round",
+            "ArcSin", "ArcCos", "ArcTan", "ArcCot",
+            "Min", "Max", "N", "Solve", "Rationalize",
+            "E", "Pi", "True", "False"
+    );
+
+    public Map<String, Double> runAutoSolver(
+            Formula formula,
+            Map<String, Double> inputs
+    ) {
+        Map<String, Double> context = new HashMap<>();
+
+        if (inputs != null) {
+            context.putAll(inputs);
+        }
+
+        if (formula == null) {
+            return context;
+        }
+
+        if (formula.getScripts() == null ||
+                formula.getScripts().isEmpty()) {
             return context;
         }
 
         boolean progress;
-        int maxPasses = 10; // Захист від нескінченного циклу
+        int pass = 0;
 
         do {
             progress = false;
+            pass++;
+
             for (FormulaScript script : formula.getScripts()) {
-                String rawEquation = script.getExpression();
+
+                if (script == null) {
+                    continue;
+                }
+
+                String expression = script.getExpression();
                 String target = script.getTarget();
 
-                // Якщо немає "=", створюємо рівняння (наприклад, "R == U/I")
-                if (!rawEquation.contains("=")) {
-                    rawEquation = target + " == " + rawEquation;
-                } else {
-                    rawEquation = rawEquation.replace("=", "==");
+                if (expression == null ||
+                        expression.isBlank()) {
+                    continue;
                 }
 
-                List<String> rawVars = extractVariables(rawEquation);
+                try {
+                    String equation =
+                            buildEquation(expression, target);
 
-                String missingVar = null;
-                int missingCount = 0;
+                    Set<String> variables =
+                            extractVariables(equation);
 
-                for (String v : rawVars) {
-                    if (!context.containsKey(v)) {
-                        missingVar = v;
-                        missingCount++;
-                    }
-                }
+                    Set<String> missingVariables =
+                            new LinkedHashSet<>();
 
-                // Якщо не вистачає лише однієї змінної — можемо її знайти!
-                if (missingCount == 1) {
-                    try {
-                        Double res = solve(rawEquation, context, missingVar);
-                        if (res != null) {
-                            context.put(missingVar, res);
-                            progress = true;
+                    for (String variable : variables) {
+                        if (!context.containsKey(variable)) {
+                            missingVariables.add(variable);
                         }
-                    } catch (Exception e) {
-                        System.err.println("Помилка автосолвера для змінної " + missingVar + ": " + e.getMessage());
                     }
+
+                    if (missingVariables.size() != 1) {
+                        continue;
+                    }
+
+                    String missingVariable =
+                            missingVariables.iterator().next();
+
+                    Double result = solve(
+                            equation,
+                            context,
+                            missingVariable
+                    );
+
+                    if (result == null ||
+                            !Double.isFinite(result)) {
+                        continue;
+                    }
+
+                    if (missingVariable.matches("^[RCLf].*") || missingVariable.equalsIgnoreCase("Tau")) {
+                        result = Math.abs(result);
+                    }
+
+                    Double oldValue =
+                            context.get(missingVariable);
+
+                    if (oldValue == null ||
+                            !approximatelyEqual(
+                                    oldValue,
+                                    result
+                            )) {
+
+                        context.put(
+                                missingVariable,
+                                result
+                        );
+
+                        progress = true;
+
+                        System.out.println(
+                                "AutoSolver: " +
+                                        missingVariable +
+                                        " = " +
+                                        result +
+                                        " from [" +
+                                        equation +
+                                        "]"
+                        );
+                    }
+
+                } catch (Exception e) {
+
+                    System.err.println(
+                            "Помилка автосолвера: " +
+                                    e.getMessage()
+                    );
                 }
             }
-            maxPasses--;
-        } while (progress && maxPasses > 0);
+
+        } while (progress && pass < MAX_PASSES);
 
         return context;
     }
 
-    private Double solve(String equation, Map<String, Double> context, String targetVar) {
-        // Створюємо новий екземпляр для потокобезпечності
-        ExprEvaluator evaluator = new ExprEvaluator();
+    private String buildEquation(
+            String expression,
+            String target
+    ) {
+        String equation = expression.trim();
+
+        if (containsEqualityOperator(equation)) {
+            return normalizeEqualityOperator(equation);
+        }
+
+        if (target == null ||
+                target.isBlank()) {
+
+            throw new IllegalArgumentException(
+                    "FormulaScript target не може бути порожнім: " +
+                            expression
+            );
+        }
+
+        return target.trim() +
+                " == " +
+                equation;
+    }
+
+    private boolean containsEqualityOperator(
+            String expression
+    ) {
+        return expression.contains("==") ||
+                expression.matches(
+                        ".*(?<![<>!])=(?!=).*"
+                );
+    }
+
+    private String normalizeEqualityOperator(
+            String equation
+    ) {
+        return equation.replaceAll(
+                "(?<![<>=!])=(?!=)",
+                "=="
+        );
+    }
+
+    private Double solve(
+            String equation,
+            Map<String, Double> context,
+            String targetVar
+    ) {
+        if (equation == null ||
+                equation.isBlank() ||
+                targetVar == null ||
+                targetVar.isBlank()) {
+            return null;
+        }
+
+        ExprEvaluator evaluator =
+                new ExprEvaluator();
 
         try {
-            String commandEq = equation;
+            String symjaEquation =
+                    replaceUserVariablesForSymja(
+                            equation
+                    );
 
-            // Підставляємо відомі значення у рівняння
-            for (Map.Entry<String, Double> entry : context.entrySet()) {
-                String varName = entry.getKey();
-                String val = String.valueOf(entry.getValue()).replace("E", "*^");
-                // Використовуємо регулярний вираз для точної заміни слова
-                commandEq = commandEq.replaceAll("\\b" + varName + "\\b", val);
+            String symjaTarget =
+                    toSymjaVariable(targetVar);
+
+            symjaEquation =
+                    substituteKnownValues(
+                            symjaEquation,
+                            context,
+                            targetVar
+                    );
+
+            System.out.println(
+                    "Symja equation: " +
+                            symjaEquation
+            );
+
+            String command =
+                    "Solve(" +
+                            "Rationalize(" +
+                            symjaEquation +
+                            ", 0), " +
+                            symjaTarget +
+                            ")";
+
+            IExpr result =
+                    evaluator.eval(command);
+
+            if (result == null) {
+                return null;
             }
 
-            // Формуємо команду для Symja
-            String command = "N(Solve(Rationalize(" + commandEq + "), " + targetVar + "), 50)";
+            String response =
+                    result.toString();
 
-            IExpr result = evaluator.eval(command);
-            return extractPositiveRoot(result.toString());
+            System.out.println(
+                    "Symja: " +
+                            command +
+                            " => " +
+                            response
+            );
+
+            return extractBestRoot(
+                    response,
+                    symjaTarget
+            );
 
         } catch (Exception e) {
-            System.err.println("Помилка Symja: " + e.getMessage());
+
+            System.err.println(
+                    "Помилка Symja для [" +
+                            equation +
+                            "], target [" +
+                            targetVar +
+                            "]: " +
+                            e.getMessage()
+            );
+
             return null;
         }
     }
 
-    private List<String> extractVariables(String equation) {
-        List<String> vars = new ArrayList<>();
-        // Шукаємо слова, що складаються з літер та цифр (наприклад, U, I, R1)
-        Pattern pattern = Pattern.compile("[a-zA-Z_][a-zA-Z0-9_]*");
-        Matcher matcher = pattern.matcher(equation);
+    private String replaceUserVariablesForSymja(
+            String equation
+    ) {
+        return replaceVariable(
+                equation,
+                "I",
+                INTERNAL_CURRENT
+        );
+    }
 
-        // Ігноруємо вбудовані функції Symja
-        List<String> ignoreList = List.of("Sin", "Cos", "Tan", "Log", "Sqrt", "E", "Pi");
+    private String toSymjaVariable(
+            String variable
+    ) {
+        if ("I".equals(variable)) {
+            return INTERNAL_CURRENT;
+        }
+
+        return variable;
+    }
+
+    private String substituteKnownValues(
+            String equation,
+            Map<String, Double> context,
+            String targetVar
+    ) {
+        String result = equation;
+
+        List<String> variables =
+                new ArrayList<>(
+                        context.keySet()
+                );
+
+        variables.sort(
+                Comparator.comparingInt(
+                        String::length
+                ).reversed()
+        );
+
+        for (String variable : variables) {
+
+            /*
+             * Шукану змінну не підставляємо.
+             */
+            if (variable.equals(targetVar)) {
+                continue;
+            }
+
+            Double value =
+                    context.get(variable);
+
+            if (value == null ||
+                    !Double.isFinite(value)) {
+                continue;
+            }
+
+            String symjaVariable =
+                    toSymjaVariable(variable);
+
+            String number =
+                    toSymjaNumber(value);
+
+            result = replaceVariable(
+                    result,
+                    symjaVariable,
+                    number
+            );
+        }
+
+        return result;
+    }
+
+    private String replaceVariable(
+            String text,
+            String variable,
+            String replacement
+    ) {
+        String regex =
+                "(?<![a-zA-Z0-9_])" +
+                        Pattern.quote(variable) +
+                        "(?![a-zA-Z0-9_])";
+
+        return text.replaceAll(
+                regex,
+                Matcher.quoteReplacement(
+                        replacement
+                )
+        );
+    }
+
+    private String toSymjaNumber(
+            Double value
+    ) {
+        if (value == null) {
+            return "0";
+        }
+
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException(
+                    "Некоректне число: " + value
+            );
+        }
+
+        return Double.toString(value)
+                .replace("E", "*^")
+                .replace("e", "*^");
+    }
+
+    private Set<String> extractVariables(
+            String equation
+    ) {
+        Set<String> variables =
+                new LinkedHashSet<>();
+
+        if (equation == null ||
+                equation.isBlank()) {
+            return variables;
+        }
+
+        Matcher matcher =
+                VARIABLE_PATTERN.matcher(
+                        equation
+                );
 
         while (matcher.find()) {
-            String var = matcher.group();
-            if (!ignoreList.contains(var)) {
-                vars.add(var);
+
+            String variable =
+                    matcher.group();
+
+            if (SYMJA_NAMES.contains(variable)) {
+                continue;
+            }
+
+            variables.add(variable);
+        }
+
+        return variables;
+    }
+
+    private Double extractBestRoot(
+            String symjaResponse,
+            String symjaTarget
+    ) {
+        if (symjaResponse == null ||
+                symjaResponse.isBlank()) {
+            return null;
+        }
+
+        String response = symjaResponse.trim();
+
+        if (response.equals("{}") ||
+                response.equals("List()") ||
+                response.equals("{{}}")) {
+            return null;
+        }
+
+        Pattern pattern = Pattern.compile(
+                "->\\s*([^}\\s]+)"
+        );
+
+        Matcher matcher = pattern.matcher(response);
+
+        List<String> roots = new ArrayList<>();
+
+        while (matcher.find()) {
+            roots.add(matcher.group(1));
+        }
+
+        if (roots.isEmpty()) {
+            return null;
+        }
+
+        ExprEvaluator evaluator = new ExprEvaluator();
+
+        List<Double> numericRoots = new ArrayList<>();
+
+        for (String root : roots) {
+            try {
+
+                IExpr numericResult = evaluator.eval("Re(N(" + root + "))");
+
+                if (numericResult == null) {
+                    continue;
+                }
+
+                String numStr = numericResult.toString()
+                        .replace("*10^", "E")
+                        .replace("*^", "E")
+                        .replaceAll("[()]", ""); // Очищення від дужок
+
+                double value = Double.parseDouble(numStr);
+
+                if (Double.isFinite(value)) {
+                    numericRoots.add(value);
+                }
+
+            } catch (Exception e) {
+                System.err.println(
+                        "Не вдалося перетворити корінь [" +
+                                root +
+                                "] у число: " +
+                                e.getMessage()
+                );
             }
         }
-        return vars;
-    }
 
-    private Double extractPositiveRoot(String symjaResponse) {
-        if (symjaResponse == null || symjaResponse.equals("{}") || symjaResponse.equals("List()")) {
+        if (numericRoots.isEmpty()) {
             return null;
         }
 
-        String cleanResponse = symjaResponse.replace("*^", "E");
-        Pattern pattern = Pattern.compile("->\\s*(-?\\d+(\\.\\d*)?([eE][+-]?\\d+)?)");
-        Matcher matcher = pattern.matcher(cleanResponse);
 
-        Double bestResult = null;
-
-        while (matcher.find()) {
-            try {
-                double val = Double.parseDouble(matcher.group(1));
-                if (val >= 0) return val; // Пріоритет додатним кореням
-                if (bestResult == null) bestResult = val;
-            } catch (Exception ignored) { }
+        for (Double root : numericRoots) {
+            if (root >= 0.0) {
+                return root;
+            }
         }
-        return bestResult;
+
+
+        return numericRoots.get(0);
+    }
+
+    private boolean approximatelyEqual(
+            double a,
+            double b
+    ) {
+        double difference =
+                Math.abs(a - b);
+
+        if (difference < 1e-10) {
+            return true;
+        }
+
+        double scale =
+                Math.max(
+                        Math.abs(a),
+                        Math.abs(b)
+                );
+
+        return difference <=
+                Math.max(
+                        1e-10,
+                        scale * 1e-10
+                );
     }
 }

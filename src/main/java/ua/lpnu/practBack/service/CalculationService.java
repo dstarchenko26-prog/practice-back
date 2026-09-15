@@ -85,25 +85,54 @@ public class CalculationService {
 
         if (request.getInputs() != null) {
             calculation.setInputs(request.getInputs());
-            calculation.setInputUnits(request.getInputUnits() != null ? request.getInputUnits() : new HashMap<>());
+
+            Map<String, String> inputUnits = request.getInputUnits() != null ? request.getInputUnits() : new HashMap<>();
+            calculation.setInputUnits(inputUnits);
 
             var formula = calculation.getFormula();
 
-            // Нормалізуємо та рахуємо
-            Map<String, Double> normalizedInputs = normalizeInputs(formula, request.getInputs(), request.getInputUnits());
-            Map<String, Double> allCalculatedVars = mathService.runAutoSolver(formula, normalizedInputs);
+            Map<String, Double> normalizedInputs = new HashMap<>();
+            request.getInputs().forEach((key, val) -> {
+                double mult = getUnitMultiplier(formula, key, inputUnits);
+                normalizedInputs.put(key, val * mult);
+            });
 
-            // Відділяємо результати від вхідних даних
-            Map<String, Double> results = new HashMap<>(allCalculatedVars);
-            request.getInputs().keySet().forEach(results::remove);
+            Map<String, Double> idealVars = mathService.runAutoSolver(formula, normalizedInputs);
+            Map<String, Double> exactResults = new HashMap<>(idealVars);
+            normalizedInputs.keySet().forEach(exactResults::remove); // Видаляємо введені користувачем дані
 
-            // Стандартизація
-            Map<String, Double> stdResults = standardizationService.standardizeResults(results);
-            Map<String, Double> deviations = standardizationService.calculateDeviations(results, stdResults);
+            Map<String, Double> e24Overrides = standardizationService.getE24Overrides(exactResults);
 
-            calculation.setResults(results);
-            calculation.setStandardizedResults(stdResults);
-            calculation.setDeviations(deviations);
+            Map<String, Double> stdResultsBase = new HashMap<>();
+            if (!e24Overrides.isEmpty()) {
+                Map<String, Double> realWorldInputs = new HashMap<>(normalizedInputs);
+                realWorldInputs.putAll(e24Overrides);
+
+                Map<String, Double> realWorldVars = mathService.runAutoSolver(formula, realWorldInputs);
+
+                stdResultsBase.putAll(realWorldVars);
+                normalizedInputs.keySet().forEach(stdResultsBase::remove);
+                stdResultsBase.putAll(e24Overrides);
+            } else {
+                stdResultsBase.putAll(exactResults);
+            }
+
+            Map<String, Double> finalExactResults = new HashMap<>();
+            exactResults.forEach((key, val) -> {
+                double mult = getUnitMultiplier(formula, key, inputUnits);
+                finalExactResults.put(key, val / mult);
+            });
+
+            Map<String, Double> finalStdResults = new HashMap<>();
+            stdResultsBase.forEach((key, val) -> {
+                double mult = getUnitMultiplier(formula, key, inputUnits);
+                finalStdResults.put(key, val / mult);
+            });
+
+            calculation.setResults(finalExactResults);
+            calculation.setStandardizedResults(finalStdResults);
+
+            calculation.setDeviations(standardizationService.calculateDeviations(finalExactResults, finalStdResults));
         }
 
         return mapToDto(calculationRepository.save(calculation));
@@ -114,30 +143,22 @@ public class CalculationService {
         calculationRepository.deleteById(id);
     }
 
-    private Map<String, Double> normalizeInputs(Formula formula, Map<String, Double> inputs, Map<String, String> inputUnits) {
-        Map<String, Double> normalized = new HashMap<>();
-        if (inputs == null) return normalized;
+    private double getUnitMultiplier(Formula formula, String key, Map<String, String> inputUnits) {
+        if (inputUnits == null || !inputUnits.containsKey(key)) return 1.0;
+        String unitName = inputUnits.get(key);
 
-        inputs.forEach((key, val) -> {
-            double multiplier = 1.0;
+        var paramOpt = formula.getParameters().stream()
+                .filter(p -> p.getVar().equals(key))
+                .findFirst();
 
-            var paramOpt = formula.getParameters().stream()
-                    .filter(p -> p.getVar().equals(key))
-                    .findFirst();
-
-            if (paramOpt.isPresent() && inputUnits != null && inputUnits.containsKey(key)) {
-                String unitName = inputUnits.get(key);
-                if (paramOpt.get().getUnits() != null) {
-                    multiplier = paramOpt.get().getUnits().stream()
-                            .filter(u -> u.getName().equals(unitName))
-                            .findFirst()
-                            .map(Formula.UnitDefinition::getMult)
-                            .orElse(1.0);
-                }
-            }
-            normalized.put(key, val * multiplier);
-        });
-        return normalized;
+        if (paramOpt.isPresent() && paramOpt.get().getUnits() != null) {
+            return paramOpt.get().getUnits().stream()
+                    .filter(u -> u.getName().equals(unitName))
+                    .findFirst()
+                    .map(Formula.UnitDefinition::getMult)
+                    .orElse(1.0);
+        }
+        return 1.0;
     }
 
     private CalculationResponse mapToDto(Calculation calc) {

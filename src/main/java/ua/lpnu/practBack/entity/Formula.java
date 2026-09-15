@@ -5,6 +5,7 @@ import lombok.*;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Entity
@@ -59,4 +60,7 @@ public class Formula {
         private String name;       // Наприклад: "мВ"
         private Double mult;       // Наприклад: 0.001
     }
+
+    @OneToMany(mappedBy = "formula", cascade = CascadeType.REMOVE, orphanRemoval = true)
+    private List<Calculation> calculations = new ArrayList<>();
 }
