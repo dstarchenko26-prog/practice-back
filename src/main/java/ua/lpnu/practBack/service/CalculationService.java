@@ -22,7 +22,7 @@ public class CalculationService {
     private final FormulaRepository formulaRepository;
     private final CalculationRepository calculationRepository;
     private final MathService mathService;
-    // private final StandardizationService standardizationService;
+    private final StandardizationService standardizationService;
 
     @Transactional(readOnly = true)
     public CalculationResponse getById(Long id) {
@@ -97,9 +97,9 @@ public class CalculationService {
             Map<String, Double> results = new HashMap<>(allCalculatedVars);
             request.getInputs().keySet().forEach(results::remove);
 
-            // Стандартизація (ПОКИ ЩО ЗАГЛУШКА)
-            Map<String, Double> stdResults = new HashMap<>(); // standardizationService.standardizeResults(results);
-            Map<String, Double> deviations = new HashMap<>(); // standardizationService.calculateDeviations(results, stdResults);
+            // Стандартизація
+            Map<String, Double> stdResults = standardizationService.standardizeResults(results);
+            Map<String, Double> deviations = standardizationService.calculateDeviations(results, stdResults);
 
             calculation.setResults(results);
             calculation.setStandardizedResults(stdResults);
